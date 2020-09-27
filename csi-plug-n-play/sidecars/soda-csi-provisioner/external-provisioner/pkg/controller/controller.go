@@ -20,6 +20,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+
+	"encoding/json"
+	"io/ioutil"
+	"net/http"
+
 	"math"
 	"os"
 	"strings"
@@ -424,6 +429,28 @@ func (p *csiProvisioner) Provision(options controller.ProvisionOptions) (*v1.Per
 	return pv, err
 }
 
+type CustomPropertiesSpec map[string]interface{}
+
+func (cps CustomPropertiesSpec) IsEmpty() bool {
+	if nil == cps {
+		return true
+	}
+	return false
+}
+
+func (cps CustomPropertiesSpec) GetDriverPreference() map[string]interface{} {
+	caps := make(map[string]interface{})
+	if cps.IsEmpty() {
+		return caps
+	}
+	for k, v := range cps {
+		words := strings.Split(k, ":")
+		if len(words) > 1 && words[0] == "driver" {
+			caps[words[1]] = v
+		}
+	}
+	return caps
+}
 func (p *csiProvisioner) ProvisionExt(options controller.ProvisionOptions) (*v1.PersistentVolume, controller.ProvisioningState, error) {
 	if options.StorageClass == nil {
 		return nil, controller.ProvisioningFinished, errors.New("storage class was nil")
@@ -437,33 +464,31 @@ func (p *csiProvisioner) ProvisionExt(options controller.ProvisionOptions) (*v1.
 	klog.Infof("The Backend Driver Name is : %s ",backendDriverName)
 	klog.Infof("The provisioner.DriverName  is : %s ",p.driverName)
 
-	//TODO Make this code work with SODA API-Server (Issue is with Grpc version, soda uses v1.29.1 whereas csi-provisioner uses v1.26.0
-	/*client, err := opensds.GetClient("192.168.20.61:50040", "noauth")
-	if client == nil || err != nil {
-		klog.Errorf("get opensds client failed: %v", err)
-
-	}
-
-	if options.StorageClass.Provisioner == "soda-csi-block" {
+	if options.StorageClass.Provisioner == "soda-csi" {
 		for k, v := range options.StorageClass.Parameters {
 			klog.Infof("The parameters in the StorageClass are  : %s ===== %s",k,v)
 			if k == "profile" {
 
-				profile, errosds := client.GetProfile(v)
-				if errosds != nil {
-					klog.Infof("Got error in GetProfile  : %s ===== %s", errosds.Error())
-				}
-				klog.Infof("The profile name recieved in the storageClass is: %s ===== %s",profile.Name)
-				if backendDriverName != profile.Name {
-					return nil, controller.ProvisioningFinished, &controller.IgnoredError{
-						Reason: fmt.Sprintf("PVC doesnot match the current driver name : %s with expected %s",
-							p.driverName, profile.Name),
+				response, err := http.Get("http://soda-proxy:50029/getprofile/"+v)
+				if err != nil {
+					klog.Infof("Got error in GetProfile  : %s ===== %s", err.Error())
+				} else {
+					data, _ := ioutil.ReadAll(response.Body)
+					fmt.Println(string(data))
+					var customProperties *CustomPropertiesSpec
+					json.Unmarshal(data, &customProperties)
+					klog.Infof("The profile name recieved in the storageClass is: %s ===== %s",customProperties.GetDriverPreference())
+					if backendDriverName != "profile.Name" {
+						return nil, controller.ProvisioningFinished, &controller.IgnoredError{
+							Reason: fmt.Sprintf("PVC doesnot match the current driver name : %s with expected %s",
+								p.driverName, "profile.Name"),
+						}
 					}
 				}
 			}
 		}
-	}*/
-	if options.StorageClass.Provisioner == "soda-csi-block" {
+	}
+	/*if options.StorageClass.Provisioner == "soda-csi-block" {
 		for k, v := range options.StorageClass.Parameters {
 			klog.Infof("The parameters in the StorageClass are  : %s ===== %s",k,v)
 			if k == "profile" {
@@ -475,7 +500,7 @@ func (p *csiProvisioner) ProvisionExt(options controller.ProvisionOptions) (*v1.
 				}
 			}
 		}
-	}
+	}*/
 
 
 	if options.PVC.Annotations[annStorageProvisioner] != p.driverName && options.PVC.Annotations[annMigratedTo] != p.driverName {
