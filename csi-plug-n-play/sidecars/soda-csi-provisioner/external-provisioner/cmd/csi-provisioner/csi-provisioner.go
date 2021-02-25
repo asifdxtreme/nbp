@@ -194,11 +194,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	//SODA CHANGE
 	// Autodetect provisioner name
-	provisionerName, err := ctrl.GetDriverName(grpcClient, *operationTimeout)
+	/*provisionerName, err := ctrl.GetDriverName(grpcClient, *operationTimeout)
 	if err != nil {
 		klog.Fatalf("Error getting CSI driver name: %s", err)
-	}
+	}*/
+	provisionerName := "soda-csi"
 	klog.V(2).Infof("Detected CSI driver %s", provisionerName)
 
 	// Prepare http endpoint for metrics + leader election healthz

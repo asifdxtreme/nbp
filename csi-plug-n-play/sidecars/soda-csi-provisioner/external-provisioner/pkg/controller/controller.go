@@ -20,10 +20,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"strings"
-	"time"
+	"io/ioutil"
 
+	"encoding/json"
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -48,8 +47,12 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
+	"net/http"
+	"os"
 	"sigs.k8s.io/sig-storage-lib-external-provisioner/v6/controller"
 	"sigs.k8s.io/sig-storage-lib-external-provisioner/v6/util"
+	"strings"
+	"time"
 
 	"github.com/kubernetes-csi/csi-lib-utils/connection"
 	"github.com/kubernetes-csi/csi-lib-utils/metrics"
@@ -139,6 +142,8 @@ const (
 	snapshotNotBound = "snapshot %s not bound"
 
 	pvcCloneFinalizer = "provisioner.storage.kubernetes.io/cloning-protection"
+
+	operationTimeout = 10 * time.Second
 )
 
 var (
@@ -494,6 +499,17 @@ type prepareProvisionResult struct {
 	req            *csi.CreateVolumeRequest
 	csiPVSource    *v1.CSIPersistentVolumeSource
 }
+type CustomPropertiesSpec map[string]interface{}
+
+func (cps CustomPropertiesSpec) GetDriverPreference() string {
+	var driverName string
+	for k, v := range cps {
+		if k == "driver" {
+			driverName = fmt.Sprintf("%v", v)
+		}
+	}
+	return driverName
+}
 
 // prepareProvision does non-destructive parameter checking and preparations for provisioning a volume.
 func (p *csiProvisioner) prepareProvision(ctx context.Context, claim *v1.PersistentVolumeClaim, sc *storagev1.StorageClass, selectedNode *v1.Node) (*prepareProvisionResult, controller.ProvisioningState, error) {
@@ -501,6 +517,38 @@ func (p *csiProvisioner) prepareProvision(ctx context.Context, claim *v1.Persist
 		return nil, controller.ProvisioningFinished, errors.New("storage class was nil")
 	}
 
+	//SODA-CHANGE
+	backendDriverName, err := GetDriverName(p.grpcClient, operationTimeout)
+	if err != nil {
+		klog.Fatalf("Error getting CSI driver name: %s", err)
+	}
+	klog.Infof("The Backend Driver Name and provisioner name is : %s , %s", backendDriverName, p.driverName)
+
+	if sc.Provisioner == "soda-csi" {
+		for k, v := range sc.Parameters {
+			klog.Infof("The parameters in the StorageClass are  : %s ===== %s", k, v)
+			if k == "profile" {
+
+				response, err := http.Get("http://soda-proxy:50029/getprofile/" + v)
+				if err != nil {
+					klog.Infof("Got error in GetProfile  : %s ===== %s", err.Error())
+				} else {
+					data, _ := ioutil.ReadAll(response.Body)
+					var customProperties *CustomPropertiesSpec
+					json.Unmarshal(data, &customProperties)
+					klog.Infof("The profile name received in the storageClass is: %s", customProperties.GetDriverPreference())
+					if backendDriverName != customProperties.GetDriverPreference() {
+						return nil, controller.ProvisioningFinished, &controller.IgnoredError{
+							Reason: fmt.Sprintf("PVC doesnot match the current driver name : %s with expected %s",
+								p.driverName, "profile.Name"),
+						}
+					}
+				}
+			}
+		}
+	}
+
+	sc.Provisioner = backendDriverName
 	migratedVolume := false
 	if p.supportsMigrationFromInTreePluginName != "" {
 		// NOTE: we cannot depend on PVC.Annotations[volume.beta.kubernetes.io/storage-provisioner] to get
@@ -662,7 +710,7 @@ func (p *csiProvisioner) prepareProvision(ctx context.Context, claim *v1.Persist
 		return nil, controller.ProvisioningNoChange, err
 	}
 	csiPVSource := &v1.CSIPersistentVolumeSource{
-		Driver: p.driverName,
+		Driver: sc.Provisioner,
 		// VolumeHandle and VolumeAttributes will be added after provisioning.
 		ControllerPublishSecretRef: controllerPublishSecretRef,
 		NodeStageSecretRef:         nodeStageSecretRef,
